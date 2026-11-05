@@ -24,19 +24,21 @@ build-options:
     BASEAPP_DISABLE_NUMPY: '1'
 cleanup-commands:
   - /app/cleanup-BaseApp.sh
-  # Keep only the Qt bindings this app imports (Core, Gui, Widgets, Network, Svg)
+  # Keep only the Qt bindings this app imports (Core, Gui, Widgets, Network)
   - |
     cd /app/lib/python3*/site-packages/PySide6
     for f in Qt*.abi3.so; do
-      case "$f" in QtCore.*|QtGui.*|QtWidgets.*|QtNetwork.*|QtSvg.*) ;; *) rm -f "$f" ;; esac
+      case "$f" in QtCore.*|QtGui.*|QtWidgets.*|QtNetwork.*) ;; *) rm -f "$f" ;; esac
     done
-    rm -rf libpyside6qml* include typesystems glue scripts doc *.pyi
+    rm -rf libpyside6qml* include typesystems glue scripts doc *.pyi QtAsyncio
     # bundled FFmpeg (for QtMultimedia), Qt developer tools, cmake files
     rm -rf Qt lib assistant balsam balsamui designer linguist lrelease lupdate qml* qsb
   # Build-time only: shiboken generator and the clang/LLVM it needs, PyOpenGL, Qt tooling
   - rm -rf /app/lib/libLLVM* /app/lib/libclang* /app/lib/python3*/site-packages/shiboken6_generator
   - rm -rf /app/lib/python3*/site-packages/OpenGL /app/lib/python3*/site-packages/PyOpenGL*
   - rm -rf /app/mkspecs /app/lib/libexec /app/bin/shiboken6* /app/bin/qwebengine*
+  # Pygments (syntax highlighting) comes in with rich but OCRmyPDF never uses it
+  - rm -rf /app/lib/python3*/site-packages/pygments /app/lib/python3*/site-packages/pygments-* /app/bin/pygmentize
 cleanup:
   - /include
   - /lib/pkgconfig
@@ -108,6 +110,7 @@ modules:
       - --without-ijs
       - --without-libpaper
       - --disable-contrib
+      - --with-system-libtiff
     make-args:
       - gs
     make-install-args:
@@ -120,6 +123,11 @@ modules:
         url: https://github.com/ArtifexSoftware/ghostpdl.git
         tag: ghostpdl-10.08.0
         commit: 05631c2cba4e578fdd6bd25cae6f0939436de848
+      # Use the runtime's shared libraries instead of Ghostscript's bundled copies
+      # (smaller, and they get security updates with the runtime)
+      - type: shell
+        commands:
+          - rm -rf freetype jpeg libpng zlib tiff openjpeg
 
   - name: unpaper
     buildsystem: meson

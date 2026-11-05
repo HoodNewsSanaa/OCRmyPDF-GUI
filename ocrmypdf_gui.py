@@ -24,7 +24,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QProcess, QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtGui import QDesktopServices, QFont, QIcon, QPixmap
+from PySide6.QtGui import QDesktopServices, QFont, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QStackedWidget,
     QTabWidget,
@@ -132,6 +133,16 @@ COLOR_STRATEGIES = [
     ("Gray", "Gray"),
     ("UseDeviceIndependentColor", "UseDeviceIndependentColor"),
 ]
+
+# --rotate-pages-threshold presets: how sure Tesseract must be before a page is rotated.
+# 14 is OCRmyPDF's own default; lower rotates more pages but risks wrong flips.
+ROTATION_LEVELS = [
+    ("Conservative", 14.0),
+    ("Moderate", 8.0),
+    ("Aggressive", 4.0),
+    ("Very aggressive", 2.0),
+]
+ROTATION_DEFAULT = 14.0
 
 # Where each OCRmyPDF stage sits on a single file's 0..100% scale.
 # OCR is by far the slowest step, so it gets the largest share.
@@ -591,13 +602,34 @@ class OptionsPage(QWidget):
         self.rotate_pages.setChecked(s.value("rotate_pages", True, type=bool))
         form.addRow(self.rotate_pages)
 
+        # Rotation aggressiveness: labelled presets plus a custom confidence value
+        self.rotate_level = QComboBox()
+        for label, value in ROTATION_LEVELS:
+            self.rotate_level.addItem(f"{label} ({value:g})", value)
+        self.rotate_level.addItem("Custom…", None)
         self.rotate_threshold = QDoubleSpinBox()
-        self.rotate_threshold.setRange(0, 100)
+        self.rotate_threshold.setRange(0.1, 100)
+        self.rotate_threshold.setDecimals(1)
         self.rotate_threshold.setSingleStep(0.5)
-        self.rotate_threshold.setSpecialValueText("Default")
-        self.rotate_threshold.setValue(float(s.value("rotate_threshold", 0)))
-        self.rotate_threshold.setToolTip("Confidence needed before a page is rotated (default 14). Lower = more aggressive.")
-        form.addRow("   Rotation confidence:", self.rotate_threshold)
+        saved = float(s.value("rotate_threshold", ROTATION_DEFAULT) or ROTATION_DEFAULT)
+        self.rotate_threshold.setValue(saved)  # 0 from older versions means "default"
+        self._sync_rotate_level()
+        self.rotate_level.currentIndexChanged.connect(self._rotate_level_changed)
+        self.rotate_threshold.valueChanged.connect(self._sync_rotate_level)
+        tip = ("How sure Tesseract must be that a page is sideways or upside down before it "
+               "is rotated. Lower values fix more pages but may flip some wrongly.")
+        self.rotate_level.setToolTip(tip)
+        self.rotate_threshold.setToolTip(tip)
+        rot_row = QHBoxLayout()
+        rot_row.addWidget(self.rotate_level)
+        rot_row.addWidget(QLabel("Custom:"))
+        rot_row.addWidget(self.rotate_threshold)
+        rot_row.addStretch()
+        form.addRow("   Rotation aggressiveness:", rot_row)
+        self.rotate_pages.toggled.connect(self.rotate_level.setEnabled)
+        self.rotate_pages.toggled.connect(self.rotate_threshold.setEnabled)
+        self.rotate_level.setEnabled(self.rotate_pages.isChecked())
+        self.rotate_threshold.setEnabled(self.rotate_pages.isChecked())
 
         self.deskew = QCheckBox("Deskew (straighten crooked scans)")
         self.deskew.setChecked(s.value("deskew", True, type=bool))
@@ -745,6 +777,23 @@ class OptionsPage(QWidget):
         form.addRow("Extra arguments:", self.extra_args)
         return w
 
+    def _rotate_level_changed(self, index):
+        value = self.rotate_level.itemData(index)
+        if value is not None:  # a preset; "Custom…" keeps the typed value
+            self.rotate_threshold.blockSignals(True)
+            self.rotate_threshold.setValue(value)
+            self.rotate_threshold.blockSignals(False)
+            self.update_preview()
+
+    def _sync_rotate_level(self, *_):
+        """Select the preset matching the custom value, or "Custom…"."""
+        value = self.rotate_threshold.value()
+        index = next((i for i, (_, v) in enumerate(ROTATION_LEVELS) if abs(v - value) < 1e-6),
+                     len(ROTATION_LEVELS))
+        self.rotate_level.blockSignals(True)
+        self.rotate_level.setCurrentIndex(index)
+        self.rotate_level.blockSignals(False)
+
     def populate_languages(self, checked: set[str]):
         self.lang_list.blockSignals(True)
         self.lang_list.clear()
@@ -821,8 +870,7 @@ class OptionsPage(QWidget):
             a += ["--pages", self.pages.text().strip()]
         if self.rotate_pages.isChecked():
             a.append("--rotate-pages")
-            if self.rotate_threshold.value() > 0:
-                a += ["--rotate-pages-threshold", f"{self.rotate_threshold.value():g}"]
+            a += ["--rotate-pages-threshold", f"{self.rotate_threshold.value():g}"]
         if self.deskew.isChecked():
             a.append("--deskew")
         if self.clean.isChecked():
@@ -1015,7 +1063,11 @@ class ProgressPage(QWidget):
         self.file_lbl = QLabel("")
         self.file_lbl.setStyleSheet("font-weight: 600;")
         self.stage_lbl = QLabel("")
-        self.stage_lbl.setStyleSheet("color: palette(mid);")
+        # White text on a dark backing so the page count is readable on any theme
+        self.stage_lbl.setStyleSheet(
+            "color: white; background: rgba(0, 0, 0, 150); border-radius: 4px; padding: 2px 8px;"
+        )
+        self.stage_lbl.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         self.file_bar = QProgressBar()
         self.file_bar.setRange(0, 1000)
         self.file_bar.setFormat("")
@@ -1281,6 +1333,7 @@ class MainWindow(QMainWindow):
         pp = self.progress_page
         pp.file_lbl.setText(f"File {self.current + 1} of {len(self.jobs)}: {job.src.name}")
         pp.stage_lbl.setText("Starting…")
+        pp.stage_lbl.show()
         pp.file_bar.setValue(0)
         pp.log.appendPlainText(f"\n$ ocrmypdf {shlex.join(args[4:])}")
         pp.refresh_jobs(self.jobs)
@@ -1439,7 +1492,7 @@ class MainWindow(QMainWindow):
             pp.percent.setText("100%")
             pp.overall.setValue(1000)
         pp.eta_lbl.setText(f"Total time: {total}")
-        pp.stage_lbl.setText("")
+        pp.stage_lbl.hide()
         pp.file_lbl.setText("")
         if not self.cancelled:
             pp.file_bar.hide()
