@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 *.flatpak
+*.flatpak.sha256
 .flatpak-builder/
 flatpak/build/
 flatpak/repo/
