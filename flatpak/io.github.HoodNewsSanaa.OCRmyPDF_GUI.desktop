@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OCRmyPDF GUI
+GenericName=PDF Text Recognition
+Comment=Make scanned PDFs searchable
+Exec=ocrmypdf-gui %F
+Icon=io.github.HoodNewsSanaa.OCRmyPDF_GUI
+Terminal=false
+MimeType=application/pdf;image/png;image/jpeg;image/tiff;
+Categories=Graphics;Scanning;OCR;
+Keywords=OCR;PDF;scan;text;searchable;tesseract;

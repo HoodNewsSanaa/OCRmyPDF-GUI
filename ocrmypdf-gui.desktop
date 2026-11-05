@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=OCRmyPDF GUI
+Comment=Make scanned PDFs searchable
+# Edit these two paths to where you put the app:
+Exec=python3 /path/to/ocrmypdf-gui/ocrmypdf_gui.py %F
+Icon=/path/to/ocrmypdf-gui/icon.png
+MimeType=application/pdf;image/png;image/jpeg;image/tiff;
+Categories=Office;Utility;

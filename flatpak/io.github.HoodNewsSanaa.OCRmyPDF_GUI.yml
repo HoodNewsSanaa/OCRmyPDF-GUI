@@ -1,0 +1,161 @@
+app-id: io.github.HoodNewsSanaa.OCRmyPDF_GUI
+runtime: org.kde.Platform
+runtime-version: '6.11'
+sdk: org.kde.Sdk
+base: io.qt.PySide.BaseApp
+base-version: '6.11'
+command: ocrmypdf-gui
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # downloading extra OCR languages
+  - --share=network
+  # read input files and write the OCR'd PDFs next to them
+  - --filesystem=home
+  - --filesystem=/media
+  - --filesystem=/run/media
+  - --filesystem=/mnt
+build-options:
+  env:
+    # let the PySide base app's cleanup script drop parts this app doesn't use
+    BASEAPP_REMOVE_WEBENGINE: '1'
+    BASEAPP_DISABLE_NUMPY: '1'
+cleanup-commands:
+  - /app/cleanup-BaseApp.sh
+  # Keep only the Qt bindings this app imports (Core, Gui, Widgets, Network, Svg)
+  - |
+    cd /app/lib/python3*/site-packages/PySide6
+    for f in Qt*.abi3.so; do
+      case "$f" in QtCore.*|QtGui.*|QtWidgets.*|QtNetwork.*|QtSvg.*) ;; *) rm -f "$f" ;; esac
+    done
+    rm -rf libpyside6qml* include typesystems glue scripts doc *.pyi
+    # bundled FFmpeg (for QtMultimedia), Qt developer tools, cmake files
+    rm -rf Qt lib assistant balsam balsamui designer linguist lrelease lupdate qml* qsb
+  # Build-time only: shiboken generator and the clang/LLVM it needs, PyOpenGL, Qt tooling
+  - rm -rf /app/lib/libLLVM* /app/lib/libclang* /app/lib/python3*/site-packages/shiboken6_generator
+  - rm -rf /app/lib/python3*/site-packages/OpenGL /app/lib/python3*/site-packages/PyOpenGL*
+  - rm -rf /app/mkspecs /app/lib/libexec /app/bin/shiboken6* /app/bin/qwebengine*
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - /share/man
+  - /share/doc
+  - '*.a'
+  - '*.la'
+modules:
+  - name: leptonica
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_SHARED_LIBS=ON
+      - -DCMAKE_INSTALL_LIBDIR=lib
+      - -DBUILD_PROG=OFF
+      - -DSW_BUILD=OFF
+    sources:
+      - type: git
+        url: https://github.com/DanBloomberg/leptonica.git
+        tag: 1.87.0
+        commit: 13275a278eb55b5746e33f95fbf5a2c8f604b3ab
+
+  - name: tesseract
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_SHARED_LIBS=ON
+      - -DCMAKE_INSTALL_LIBDIR=lib
+      - -DBUILD_TRAINING_TOOLS=OFF
+      - -DBUILD_TESTS=OFF
+      - -DGRAPHICS_DISABLED=ON
+      - -DDISABLE_CURL=ON
+      - -DDISABLE_ARCHIVE=ON
+      # OCRmyPDF parallelizes per page; OpenMP inside tesseract only slows it down
+      - -DOPENMP_BUILD=OFF
+      - -DENABLE_NATIVE=OFF
+    sources:
+      - type: git
+        url: https://github.com/tesseract-ocr/tesseract.git
+        tag: 5.5.4
+        commit: 7e548e6eff172f38f97664afe7f7ce40db36c8d6
+
+  - name: tessdata
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 -t /app/share/tessdata *.traineddata
+    sources:
+      - type: file
+        url: https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/87416418657359cb625c412a48b6e1d6d41c29bd/eng.traineddata
+        sha256: 7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2
+      - type: file
+        url: https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/87416418657359cb625c412a48b6e1d6d41c29bd/osd.traineddata
+        sha256: 9cf5d576fcc47564f11265841e5ca839001e7e6f38ff7f7aacf46d15a96b00ff
+
+  - name: ghostscript
+    buildsystem: autotools
+    config-opts:
+      - --disable-cups
+      - --disable-gtk
+      - --disable-dbus
+      - --without-x
+      - --without-tesseract
+      - --without-pcl
+      - --without-xps
+      - --without-gpdl
+      - --without-ijs
+      - --without-libpaper
+      - --disable-contrib
+    make-args:
+      - gs
+    make-install-args:
+      - install-gs
+    cleanup:
+      - /share/ghostscript/*/examples
+      - /share/ghostscript/*/doc
+    sources:
+      - type: git
+        url: https://github.com/ArtifexSoftware/ghostpdl.git
+        tag: ghostpdl-10.08.0
+        commit: 05631c2cba4e578fdd6bd25cae6f0939436de848
+
+  - name: unpaper
+    buildsystem: meson
+    sources:
+      - type: git
+        url: https://github.com/unpaper/unpaper.git
+        tag: unpaper-7.0.0
+        commit: 5211a623d48858eae154213a61bccbc368b19ca0
+      # the man page needs sphinx, which the SDK doesn't have; drop it
+      - type: shell
+        commands:
+          - sed -i "/^sphinx = find_program/,/^)/d" meson.build
+
+  - python-deps.json
+
+  - name: ocrmypdf-gui
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 -t /app/share/ocrmypdf-gui ocrmypdf_gui.py gui_progress_plugin.py icon.svg icon.png
+      - install -Dm755 ocrmypdf-gui.sh /app/bin/ocrmypdf-gui
+      - install -Dm644 io.github.HoodNewsSanaa.OCRmyPDF_GUI.desktop /app/share/applications/io.github.HoodNewsSanaa.OCRmyPDF_GUI.desktop
+      - install -Dm644 io.github.HoodNewsSanaa.OCRmyPDF_GUI.metainfo.xml /app/share/metainfo/io.github.HoodNewsSanaa.OCRmyPDF_GUI.metainfo.xml
+      - install -Dm644 icon.svg /app/share/icons/hicolor/scalable/apps/io.github.HoodNewsSanaa.OCRmyPDF_GUI.svg
+      - install -Dm644 icon.png /app/share/icons/hicolor/256x256/apps/io.github.HoodNewsSanaa.OCRmyPDF_GUI.png
+    sources:
+      - type: file
+        path: ../ocrmypdf_gui.py
+      - type: file
+        path: ../gui_progress_plugin.py
+      - type: file
+        path: ../icon.svg
+      - type: file
+        path: ../icon.png
+      - type: file
+        path: ocrmypdf-gui.sh
+      - type: file
+        path: io.github.HoodNewsSanaa.OCRmyPDF_GUI.desktop
+      - type: file
+        path: io.github.HoodNewsSanaa.OCRmyPDF_GUI.metainfo.xml
