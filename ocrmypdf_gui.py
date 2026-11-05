@@ -16,6 +16,8 @@ import json
 import os
 import shlex
 import shutil
+import signal
+import tempfile
 import subprocess
 import sys
 import time
@@ -110,7 +112,6 @@ RASTERIZERS = [("Auto", "auto"), ("Ghostscript", "ghostscript"), ("pypdfium", "p
 OCR_ENGINES = [("Auto", "auto"), ("Tesseract", "tesseract"), ("None (no OCR)", "none")]
 PSM_MODES = [
     ("Default", None),
-    ("0 - Orientation & script detection only", 0),
     ("1 - Automatic with OSD", 1),
     ("3 - Fully automatic (Tesseract default)", 3),
     ("4 - Single column of variable sizes", 4),
@@ -120,9 +121,7 @@ PSM_MODES = [
 ]
 OEM_MODES = [
     ("Default", None),
-    ("0 - Legacy engine", 0),
     ("1 - LSTM neural net", 1),
-    ("2 - Legacy + LSTM", 2),
     ("3 - Default available", 3),
 ]
 COLOR_STRATEGIES = [
@@ -227,6 +226,20 @@ def user_tessdata_dir() -> Path | None:
     return base / "tessdata"
 
 
+JOB_TMP_PREFIX = "ocrmypdf-gui-job-"
+
+
+def remove_stale_job_folders(max_age_hours: float = 12) -> None:
+    """Delete temp folders left behind by jobs that crashed or were killed."""
+    cutoff = time.time() - max_age_hours * 3600
+    for d in Path(tempfile.gettempdir()).glob(JOB_TMP_PREFIX + "*"):
+        try:
+            if d.is_dir() and d.stat().st_mtime < cutoff:
+                shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
+
+
 def setup_tessdata() -> None:
     bundled = os.environ.get("OCRMYPDF_GUI_BUNDLED_TESSDATA")
     target = user_tessdata_dir()
@@ -257,6 +270,27 @@ def tesseract_languages() -> list[str]:
         return []
     langs = [ln.strip() for ln in out.splitlines()[1:] if ln.strip()]
     return sorted(lang for lang in langs if lang != "osd")
+
+
+FALLBACK_IMAGE_DPI = 300
+
+
+def image_needs_dpi(path: Path) -> bool:
+    """True if OCRmyPDF would reject this image for lacking a usable resolution.
+
+    Mirrors OCRmyPDF's own check: no DPI in the file, or 96 DPI or less
+    (typical of screenshots and phone pictures).
+    """
+    if path.suffix.lower() not in IMAGE_EXTS:
+        return False
+    try:
+        from PIL import Image
+
+        with Image.open(path) as im:
+            dpi = im.info.get("dpi")
+            return dpi is None or tuple(dpi) <= (96, 96)
+    except Exception:
+        return False
 
 
 def page_count(path: Path) -> int:
@@ -518,6 +552,10 @@ class OptionsPage(QWidget):
         btns.addWidget(self.start_btn)
         root.addLayout(btns)
 
+        self._locked: dict = {}  # widget -> (user's value, was enabled) while a mode forces it
+        self.mode.currentIndexChanged.connect(self._apply_constraints)
+        self.output_type.currentIndexChanged.connect(self._apply_constraints)
+        self._apply_constraints()
         self._connect_preview(self)
         self.update_preview()
 
@@ -554,6 +592,11 @@ class OptionsPage(QWidget):
         self.mode = combo(MODES, s.value("mode", "skip"))
         self.mode.setToolTip("What to do with pages that already contain text.")
         form.addRow("Existing text:", self.mode)
+        self.mode_note = QLabel()
+        self.mode_note.setWordWrap(True)
+        self.mode_note.setStyleSheet("color: #b36b00; font-size: 11px;")
+        self.mode_note.hide()
+        form.addRow("", self.mode_note)
 
         self.output_type = combo(OUTPUT_TYPES, s.value("output_type", "pdfa"))
         form.addRow("Output type:", self.output_type)
@@ -646,9 +689,6 @@ class OptionsPage(QWidget):
         form.addRow(self.clean)
         form.addRow(self.clean_final)
 
-        self.remove_background = QCheckBox("Remove background (experimental)")
-        self.remove_background.setChecked(s.value("remove_background", False, type=bool))
-        form.addRow(self.remove_background)
 
         self.remove_vectors = QCheckBox("Ignore vector objects when OCRing (helps on drawings/tables)")
         self.remove_vectors.setChecked(s.value("remove_vectors", False, type=bool))
@@ -665,10 +705,14 @@ class OptionsPage(QWidget):
 
         self.image_dpi = QSpinBox()
         self.image_dpi.setRange(0, 2400)
-        self.image_dpi.setSpecialValueText("Auto")
+        self.image_dpi.setSpecialValueText(f"Auto ({FALLBACK_IMAGE_DPI} if unknown)")
         self.image_dpi.setSuffix(" DPI")
         self.image_dpi.setValue(int(s.value("image_dpi", 0)))
-        self.image_dpi.setToolTip("DPI to assume for image inputs that don't specify their resolution.")
+        self.image_dpi.setToolTip(
+            "Resolution to assume for image files. Auto uses the resolution stored in the image, "
+            f"or {FALLBACK_IMAGE_DPI} DPI if it has none (common for screenshots, phone photos, "
+            "GIF, WebP and JPEG 2000)."
+        )
         form.addRow("Image input DPI:", self.image_dpi)
         return w
 
@@ -777,6 +821,56 @@ class OptionsPage(QWidget):
         form.addRow("Extra arguments:", self.extra_args)
         return w
 
+    # ----- options that OCRmyPDF does not allow together
+    def _lock(self, widget, locked: bool, forced_value=False, reason: str = ""):
+        """Force a checkbox/spinbox to a value and grey it out, or restore the user's choice."""
+        is_check = isinstance(widget, QCheckBox)
+        get = widget.isChecked if is_check else widget.value
+        put = widget.setChecked if is_check else widget.setValue
+        if locked:
+            if widget not in self._locked:
+                self._locked[widget] = (get(), widget.isEnabled(), widget.toolTip())
+            put(forced_value)
+            widget.setEnabled(False)
+            widget.setToolTip(reason)
+        elif widget in self._locked:
+            value, enabled, tip = self._locked.pop(widget)
+            put(value)
+            widget.setEnabled(enabled)
+            widget.setToolTip(tip)
+
+    def user_value(self, widget):
+        """The user's own setting, even while a mode is forcing it off."""
+        if widget in self._locked:
+            return self._locked[widget][0]
+        return widget.isChecked() if isinstance(widget, QCheckBox) else widget.value()
+
+    def _apply_constraints(self, *_):
+        mode = self.mode.currentData()
+        redo, strip = mode == "redo", mode == "strip"
+        # Unlock first so restored values are the user's, then lock what applies now.
+        widgets = [self.deskew, self.clean, self.clean_final, self.rotate_pages,
+                   self.remove_vectors, self.oversample, self.sidecar]
+        for wdg in widgets:
+            self._lock(wdg, False)
+        if strip:
+            why = "Not available with \u201cStrip OCR text layer only\u201d: no OCR is run"
+            for wdg in widgets:
+                self._lock(wdg, True, 0 if wdg is self.oversample else False, why)
+            note = ("Strip mode only removes an existing OCR text layer, so image processing, "
+                    "rotation and the sidecar text file are switched off.")
+        elif redo:
+            why = "Not available with \u201cRedo OCR\u201d (an OCRmyPDF limitation)"
+            self._lock(self.deskew, True, False, why)
+            self._lock(self.clean_final, True, False, why)
+            note = "Redo OCR can't be combined with Deskew or keeping cleaned images, so those are switched off."
+        else:
+            note = ""
+        if self.text_only() and not strip:
+            self._lock(self.sidecar, True, True, "Required when the output type is text only")
+        self.mode_note.setText(note)
+        self.mode_note.setVisible(bool(note))
+
     def _rotate_level_changed(self, index):
         value = self.rotate_level.itemData(index)
         if value is not None:  # a preset; "Custom…" keeps the typed value
@@ -877,8 +971,6 @@ class OptionsPage(QWidget):
             a.append("--clean")
         if self.clean_final.isChecked():
             a.append("--clean-final")
-        if self.remove_background.isChecked():
-            a.append("--remove-background")
         if self.remove_vectors.isChecked():
             a.append("--remove-vectors")
         if self.oversample.value():
@@ -928,6 +1020,25 @@ class OptionsPage(QWidget):
                 pass  # unbalanced quotes - validated on start
         return a
 
+    def text_only(self) -> bool:
+        return self.output_type.currentData() == "none"
+
+    def result_path_for(self, src: Path) -> Path:
+        """The file this job produces: the PDF, or the .txt for "sidecar text only"."""
+        out = self.output_path_for(src)
+        return out.with_suffix(".txt") if self.text_only() else out
+
+    def file_args(self, src: Path) -> list[str]:
+        """Per-file arguments: DPI fallback, sidecar, input and output."""
+        a: list[str] = []
+        if not self.image_dpi.value() and image_needs_dpi(src):
+            a += ["--image-dpi", str(FALLBACK_IMAGE_DPI)]
+        if self.sidecar.isChecked():
+            a += ["--sidecar", str(self.output_path_for(src).with_suffix(".txt"))]
+        # with --output-type none OCRmyPDF must not be given an output PDF path
+        a += [str(src), os.devnull if self.text_only() else str(self.output_path_for(src))]
+        return a
+
     def output_path_for(self, src: Path) -> Path:
         out_dir = src.parent if self.out_same.isChecked() else Path(self.out_dir.text().strip() or src.parent)
         return out_dir / f"{src.stem}{self.suffix.text()}.pdf"
@@ -937,10 +1048,7 @@ class OptionsPage(QWidget):
             return
         args = ["ocrmypdf", *self.build_args()]
         if self.main.files:
-            src = self.main.files[0]
-            if self.sidecar.isChecked():
-                args += ["--sidecar", str(self.output_path_for(src).with_suffix(".txt"))]
-            args += [str(src), str(self.output_path_for(src))]
+            args += self.file_args(self.main.files[0])
         else:
             args += ["input.pdf", "output.pdf"]
         self.cmd_preview.setText(shlex.join(args))
@@ -951,6 +1059,9 @@ class OptionsPage(QWidget):
             return "Add at least one file."
         if not self.selected_languages() and self.ocr_engine.currentData() != "none":
             return "Select at least one OCR language."
+        if self.mode.currentData() == "strip" and self.text_only():
+            return ("\u201cStrip OCR text layer only\u201d produces a PDF, so the output type "
+                    "can't be \u201cNone (sidecar text only)\u201d.")
         if not self.out_same.isChecked():
             d = self.out_dir.text().strip()
             if not d:
@@ -976,16 +1087,15 @@ class OptionsPage(QWidget):
         s.setValue("out_dir", self.out_dir.text())
         s.setValue("suffix", self.suffix.text())
         s.setValue("overwrite", self.overwrite.isChecked())
-        s.setValue("sidecar", self.sidecar.isChecked())
+        s.setValue("sidecar", self.user_value(self.sidecar))
         s.setValue("pages", self.pages.text())
-        s.setValue("rotate_pages", self.rotate_pages.isChecked())
+        s.setValue("rotate_pages", self.user_value(self.rotate_pages))
         s.setValue("rotate_threshold", self.rotate_threshold.value())
-        s.setValue("deskew", self.deskew.isChecked())
-        s.setValue("clean", self.clean.isChecked())
-        s.setValue("clean_final", self.clean_final.isChecked())
-        s.setValue("remove_background", self.remove_background.isChecked())
-        s.setValue("remove_vectors", self.remove_vectors.isChecked())
-        s.setValue("oversample", self.oversample.value())
+        s.setValue("deskew", self.user_value(self.deskew))
+        s.setValue("clean", self.user_value(self.clean))
+        s.setValue("clean_final", self.user_value(self.clean_final))
+        s.setValue("remove_vectors", self.user_value(self.remove_vectors))
+        s.setValue("oversample", self.user_value(self.oversample))
         s.setValue("image_dpi", self.image_dpi.value())
         s.setValue("optimize", self.optimize.currentData())
         s.setValue("jpeg_quality", self.jpeg_quality.value())
@@ -1020,7 +1130,7 @@ class Job:
     src: Path
     dst: Path
     pages: int
-    sidecar: Path | None = None
+    args: list[str] = field(default_factory=list)
     status: str = "pending"  # pending | running | done | failed | skipped
     message: str = ""
     progress: float = 0.0  # 0..1 within this file
@@ -1154,6 +1264,7 @@ class MainWindow(QMainWindow):
         self.jobs: list[Job] = []
         self.current: int = -1
         self.proc: QProcess | None = None
+        self.job_tmp = ""
         self.cancelled = False
         self.run_started = 0.0
         self.total_weight = 1
@@ -1273,10 +1384,8 @@ class MainWindow(QMainWindow):
         self.jobs = []
         existing = []
         for f in self.files:
-            dst = opts.output_path_for(f)
-            job = Job(src=f, dst=dst, pages=page_count(f))
-            if opts.sidecar.isChecked():
-                job.sidecar = dst.with_suffix(".txt")
+            dst = opts.result_path_for(f)
+            job = Job(src=f, dst=dst, pages=page_count(f), args=opts.file_args(f))
             if dst.exists() and not opts.overwrite.isChecked():
                 existing.append(dst)
             self.jobs.append(job)
@@ -1325,10 +1434,7 @@ class MainWindow(QMainWindow):
         self.stage = "Starting"
         self.stdout_buf = b""
 
-        args = ["-m", "ocrmypdf", "--plugin", str(PLUGIN_PATH), *self.base_args]
-        if job.sidecar:
-            args += ["--sidecar", str(job.sidecar)]
-        args += [str(job.src), str(job.dst)]
+        args = ["-m", "ocrmypdf", "--plugin", str(PLUGIN_PATH), *self.base_args, *job.args]
 
         pp = self.progress_page
         pp.file_lbl.setText(f"File {self.current + 1} of {len(self.jobs)}: {job.src.name}")
@@ -1344,6 +1450,9 @@ class MainWindow(QMainWindow):
             from PySide6.QtCore import QProcessEnvironment
             env = QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONUNBUFFERED", "1")
+        # A private temp folder per job, removed when the job ends however it ends
+        self.job_tmp = tempfile.mkdtemp(prefix=JOB_TMP_PREFIX)
+        env.insert("TMPDIR", self.job_tmp)
         env.insert("PYTHONIOENCODING", "utf-8")
         self.proc.setProcessEnvironment(env)
         self.proc.setProcessChannelMode(QProcess.MergedChannels)
@@ -1435,6 +1544,7 @@ class MainWindow(QMainWindow):
         if self.stdout_buf:
             self.progress_page.log.appendPlainText(self.stdout_buf.decode("utf-8", "replace"))
         self.proc.deleteLater()
+        shutil.rmtree(self.job_tmp, ignore_errors=True)
         self.proc = None
         job = self.jobs[self.current]
         elapsed = human_time(time.monotonic() - job.started)
@@ -1471,8 +1581,12 @@ class MainWindow(QMainWindow):
             if job.status == "pending":
                 job.status = "cancelled"
         proc = self.proc
-        proc.terminate()
-        QTimer.singleShot(4000, lambda: proc.kill() if self.proc is proc else None)
+        if hasattr(signal, "SIGINT") and os.name == "posix" and proc.processId():
+            # Like Ctrl+C: OCRmyPDF stops its workers and cleans up after itself
+            os.kill(proc.processId(), signal.SIGINT)
+        else:
+            proc.terminate()
+        QTimer.singleShot(10000, lambda: proc.kill() if self.proc is proc else None)
         self.progress_page.stage_lbl.setText("Cancelling…")
 
     def finish(self):
@@ -1516,6 +1630,7 @@ def main():
     app.setApplicationName(APP_NAME)
     app.setDesktopFileName(os.environ.get("FLATPAK_ID", "ocrmypdf-gui"))
     setup_tessdata()
+    remove_stale_job_folders()
     app.setWindowIcon(app_icon())
     win = MainWindow()
     win.show()
