@@ -1395,6 +1395,12 @@ class MainWindow(QMainWindow):
         else:
             job.status = "failed"
             job.message = EXIT_CODE_MESSAGES.get(code, f"failed (exit code {code})")
+            if any("No space left on device" in line for line in job.log[-50:]):
+                import tempfile
+                job.message = (
+                    "Ran out of disk space for temporary files in "
+                    f"{tempfile.gettempdir()} - free up space, or OCR fewer pages at a time"
+                )
             job.progress = 1.0  # counts as finished for overall progress
             if not self.progress_page.log.isVisible():
                 self.progress_page.toggle_log()
