@@ -63,6 +63,35 @@ modules:
         tag: 1.87.0
         commit: 13275a278eb55b5746e33f95fbf5a2c8f604b3ab
 
+  # Used by OCRmyPDF's optimization levels 2 and 3 (JBIG2 compression of
+  # black-and-white images)
+  - name: jbig2enc
+    # autotools: its meson build needs a newer meson than the SDK ships
+    buildsystem: autotools
+    config-opts:
+      - --disable-static
+    cleanup:
+      - /bin/jbig2topdf.py
+    sources:
+      - type: git
+        url: https://github.com/agl/jbig2enc.git
+        tag: '0.32'
+        commit: 309b2d55c7dfdcf0ab6afccb6d88834afc0bf2c0
+
+  # Used by OCRmyPDF's optimization levels 2 and 3 (lossy PNG compression).
+  # 2.18 is the last C release; 3.x is a Rust rewrite with the same output.
+  - name: pngquant
+    buildsystem: simple
+    build-commands:
+      - ./configure --prefix=/app --with-lcms2
+      - make -j${FLATPAK_BUILDER_N_JOBS}
+      - make install
+    sources:
+      - type: git
+        url: https://github.com/kornelski/pngquant.git
+        tag: 2.18.0
+        commit: 228897ad65d1ae58c888d2331913afc1d974764b
+
   - name: tesseract
     buildsystem: cmake-ninja
     builddir: true

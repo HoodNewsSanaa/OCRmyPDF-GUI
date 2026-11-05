@@ -14,7 +14,7 @@ A small desktop app for [OCRmyPDF](https://github.com/ocrmypdf/OCRmyPDF).
 ## All-in-one Flatpak (Linux)
 
 The `flatpak/` folder builds a self-contained app that includes Python, Qt, OCRmyPDF, Tesseract,
-Ghostscript and unpaper, so nothing else needs to be installed. English is bundled; other
+Ghostscript, unpaper, jbig2enc and pngquant, so nothing else needs to be installed. English is bundled; other
 languages can be downloaded from inside the app (**Get more languages…**).
 
 ```bash
@@ -69,6 +69,8 @@ It is a front end for these projects, which do the actual work. The Flatpak bund
 | [Leptonica](https://github.com/DanBloomberg/leptonica) | Image library used by Tesseract | BSD-2-Clause |
 | [Ghostscript](https://www.ghostscript.com/) by Artifex Software | PDF rendering and PDF/A conversion | AGPL-3.0 |
 | [unpaper](https://github.com/unpaper/unpaper) | Page cleaning | GPL-2.0 |
+| [jbig2enc](https://github.com/agl/jbig2enc) | JBIG2 compression of black-and-white scans | Apache-2.0 |
+| [pngquant](https://pngquant.org/) / libimagequant | Lossy PNG compression (optimization levels 2–3) | GPL-3.0 |
 | [Qt for Python (PySide6)](https://www.qt.io/qt-for-python) | User interface | LGPL-3.0 |
 
 Source code for every bundled component is pinned in
